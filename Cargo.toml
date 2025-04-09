@@ -1,0 +1,51 @@
+[package]
+name = "toggl_linux_rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["nagamine-git"]
+description = "Automatic activity tracking for Linux desktops with Toggl integration"
+readme = "README.md"
+license = "MIT"
+
+[dependencies]
+# HTTP & API
+reqwest = { version = "0.11.22", features = ["json"] }
+tokio = { version = "1.34.0", features = ["full"] }
+serde = { version = "1.0.193", features = ["derive"] }
+serde_json = "1.0.108"
+base64 = "0.21.5"
+url = "2.4.1"
+urlencoding = "2.1.3"
+
+# Google Calendar
+gcal = "0.1.6"
+yup-oauth2 = "8.3"
+
+# OpenAI
+async-openai = "0.16.3"
+
+# データベース
+rusqlite = { version = "0.28", features = ["bundled"] }
+
+# Linux/X11
+x11rb = "0.11"
+
+# ユーティリティ
+chrono = { version = "0.4.31", features = ["serde"] }
+log = "0.4.20"
+env_logger = "0.10.1"
+config = "0.13.4"
+anyhow = "1.0.75"
+thiserror = "1.0"
+clap = { version = "4.4.10", features = ["derive"] }
+toml = "0.8.8"
+dirs = "4.0"
+
+# 対話型ウィザード用の依存関係
+dialoguer = "0.11.0"
+console = "0.15.7"
+open = "5.0.0"
+
+[dev-dependencies]
+mockall = "0.11"
+tempfile = "3.5"

@@ -1,0 +1,30 @@
+# toggl_linux_rs 設定ファイル
+
+[general]
+# データ保存ディレクトリ
+data_dir = "./data"
+# 自動登録の信頼度しきい値（0.0-1.0）
+confidence_threshold = 0.5
+# データ収集時間間隔（秒）
+collect_interval_secs = 60    # 1分
+# 1時間あたりの時間ブロック分割数（4=15分ごと、2=30分ごと、1=1時間ごと）
+time_block_division = 4
+
+[toggl]
+# Toggl API トークン (https://track.toggl.com/profile で取得可能)
+api_token = "your_toggl_api_token"
+# ワークスペースID
+workspace_id = 0
+
+[openai]
+# OpenAI API キー
+api_key = "your_openai_api_key"
+# 使用するモデル
+model = "gpt-4o-mini"
+
+# Google Calendar 設定 (オプション)
+# [google_calendar]
+# client_id = "your_client_id"
+# client_secret = "your_client_secret"
+# refresh_token = "your_refresh_token"
+# calendar_ids = "primary" 
