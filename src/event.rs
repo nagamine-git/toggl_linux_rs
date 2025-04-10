@@ -4,6 +4,7 @@ use log::{info, debug};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use base64::Engine;
+use urlencoding;
 
 use crate::analysis::AnalysisResult;
 use crate::config::AppConfig;
@@ -305,7 +306,7 @@ impl TogglClient {
             "created_with": "toggl_linux_rs",
             "description": description,
             "project_id": project_id,
-            "start": now.to_rfc3339(),
+            "start": format_datetime_for_toggl(&now),
             "workspace_id": self.workspace_id,
         });
         
@@ -337,11 +338,17 @@ impl TogglClient {
     }
 
     pub async fn get_time_entries(&self, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<Vec<TogglTimeEntry>> {
+        let start_date_fmt = format_datetime_for_toggl(start_date);
+        let end_date_fmt = format_datetime_for_toggl(end_date);
+        let start_date_str = urlencoding::encode(&start_date_fmt);
+        let end_date_str = urlencoding::encode(&end_date_fmt);
+        
         let url = format!(
             "https://api.track.toggl.com/api/v9/me/time_entries?start_date={}&end_date={}",
-            start_date.to_rfc3339(),
-            end_date.to_rfc3339()
+            start_date_str, end_date_str
         );
+        
+        debug!("時間エントリ取得URL: {}", url);
         
         let response = self.client
             .get(&url)
@@ -366,6 +373,7 @@ impl TogglClient {
             .await
             .context("Failed to parse time entries response")?;
         
+        debug!("取得した時間エントリ数: {}", time_entries.len());
         Ok(time_entries)
     }
 
@@ -620,6 +628,7 @@ pub async fn register_to_toggl(config: &AppConfig, analysis: &AnalysisResult) ->
     let extended_analysis = ExtendedAnalysisResult {
         base: analysis,
         is_private_browsing,
+        config: Some(config),
     };
     
     // 詳細なRegister to Toggl関数を呼び出す
@@ -637,6 +646,107 @@ pub async fn register_to_toggl(config: &AppConfig, analysis: &AnalysisResult) ->
 struct ExtendedAnalysisResult<'a> {
     base: &'a AnalysisResult,
     is_private_browsing: bool,
+    config: Option<&'a AppConfig>,
+}
+
+/// RFC3339形式の日時文字列を生成（ミリ秒なし）
+fn format_datetime_for_toggl(dt: &DateTime<Utc>) -> String {
+    // TogglのAPIはミリ秒を含むと400エラーを返すので、ミリ秒なしのフォーマットを使用
+    // RFC3339/ISO8601形式で、タイムゾーンをZに設定する
+    // 例: 2023-04-10T15:30:45Z
+    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// イベント名の類似度を評価する
+async fn evaluate_activity_similarity(
+    api_key: &str,
+    activity1: &str,
+    activity2: &str,
+) -> Result<f32> {
+    debug!("AIを使用してイベント名の類似度を評価: '{}' vs '{}'", activity1, activity2);
+    
+    // OpenAI APIクライアント設定
+    let client = reqwest::Client::new();
+    let url = "https://api.openai.com/v1/chat/completions";
+    
+    // APIリクエスト作成
+    let request_body = serde_json::json!({
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {
+                "role": "system",
+                "content": "あなたはイベント名の類似度を評価するAIアシスタントです。2つのイベント名を比較し、それらの意味的な類似性を0から1の小数値で評価してください。0は全く関連がない、1は完全に同じ意味を持つことを示します。最終的な回答は数値のみを出力してください。"
+            },
+            {
+                "role": "user",
+                "content": format!("以下の2つのイベント名の類似度を0から1のスケールで評価してください。回答は数値のみを出力してください。\nイベント1: {}\nイベント2: {}", activity1, activity2)
+            }
+        ],
+        "temperature": 0.85
+    });
+    
+    // APIリクエスト送信
+    let response = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&request_body)
+        .send()
+        .await
+        .context("OpenAI APIリクエスト失敗")?;
+    
+    // レスポンスステータスチェック
+    let status = response.status();
+    if !status.is_success() {
+        let err_text = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "類似度評価APIエラー: HTTP {}, response: {}",
+            status,
+            err_text
+        ));
+    }
+    
+    // レスポンス解析
+    let response_json: serde_json::Value = response
+        .json()
+        .await
+        .context("APIレスポンスJSONの解析に失敗")?;
+    
+    // レスポンスからテキスト抽出
+    let similarity_text = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("APIレスポンスが予期しない形式です"))?
+        .trim();
+    
+    // テキストを数値に変換
+    let similarity: f32 = match similarity_text.parse() {
+        Ok(val) => val,
+        Err(e) => {
+            debug!("類似度のパースに失敗: '{}'。正確な数値のみが含まれていない可能性があります。", similarity_text);
+            
+            // 数値だけを抽出する試み
+            let numeric_chars: String = similarity_text.chars()
+                .filter(|c| c.is_digit(10) || *c == '.')
+                .collect();
+            
+            match numeric_chars.parse() {
+                Ok(val) => {
+                    debug!("数値抽出成功: {}", val);
+                    val
+                },
+                Err(_) => {
+                    return Err(anyhow::anyhow!("類似度のパースに失敗: '{}'", similarity_text));
+                }
+            }
+        }
+    };
+    
+    // 0～1の範囲に収める
+    let similarity = similarity.max(0.0).min(1.0);
+    
+    debug!("類似度評価結果: {:.2} ('{}'と'{}'の間)", similarity, activity1, activity2);
+    
+    Ok(similarity)
 }
 
 /// 活動記録をTogglに登録する（内部実装）
@@ -661,8 +771,8 @@ async fn register_to_toggl_impl(
     }
 
     debug!("Togglに記録を開始: {}", analysis.base.activity);
-    debug!("開始時間: {}", start_time.to_rfc3339());
-    debug!("終了時間: {}", stop_time.to_rfc3339());
+    debug!("開始時間: {}", format_datetime_for_toggl(&start_time));
+    debug!("終了時間: {}", format_datetime_for_toggl(&stop_time));
     debug!("信頼度: {:.2}", analysis.base.confidence);
     
     if let Some(ref window_title) = analysis.base.window_title {
@@ -681,10 +791,33 @@ async fn register_to_toggl_impl(
         debug!("プロジェクトID: なし");
     }
 
-    // 直前のエントリを取得して同名エントリの有無を確認（マージ処理）
+    // 直前のタイムブロックのエントリを取得して同名エントリの有無を確認（マージ処理）
+    // 時間ブロック単位で確認するため、検索期間は少し長めにとる
     let one_hour_ago = start_time - Duration::hours(1);
-    debug!("直前のエントリ検索中 (期間: {} ～ {})", one_hour_ago.to_rfc3339(), start_time.to_rfc3339());
+    debug!("直前のエントリ検索中 (期間: {} ～ {})", 
+           format_datetime_for_toggl(&one_hour_ago), 
+           format_datetime_for_toggl(&start_time));
     
+    // OpenAI APIキー取得
+    let openai_api_key = match &analysis.config {
+        Some(config) => {
+            match &config.openai {
+                Some(openai_config) => {
+                    debug!("OpenAI APIキーが利用可能です（類似度評価に使用）");
+                    Some(openai_config.api_key.clone())
+                },
+                None => {
+                    debug!("OpenAI設定がないため、類似度評価をスキップします");
+                    None
+                }
+            }
+        },
+        None => {
+            debug!("アプリ設定がないため、類似度評価をスキップします");
+            None
+        }
+    };
+
     match toggl_client.get_time_entries(&one_hour_ago, &start_time).await {
         Ok(entries) => {
             if !entries.is_empty() {
@@ -695,49 +828,113 @@ async fn register_to_toggl_impl(
                     debug!("エントリ確認: {} (開始: {}, 終了: {:?})", 
                            entry.description, entry.start, entry.stop);
                     
-                    // 同じ説明文かつストップ時間が開始時間の近く（15分以内）なら連結候補
-                    if entry.description == analysis.base.activity && entry.stop.is_some() {
-                        if let Ok(last_stop) = chrono::DateTime::parse_from_rfc3339(&entry.stop.clone().unwrap()) {
-                            let last_stop_utc = last_stop.with_timezone(&chrono::Utc);
-                            let minutes_diff = (start_time - last_stop_utc).num_minutes();
+                    // 同じプロジェクト（またはどちらもプロジェクトなし）かチェック
+                    let same_project = match (project_id, entry.project_id) {
+                        (Some(p1), Some(p2)) => p1 == p2,
+                        (None, None) => true,
+                        _ => false
+                    };
+
+                    if entry.stop.is_some() && same_project {
+                        let current_activity = &analysis.base.activity;
+                        let previous_activity = &entry.description;
+
+                        // アクティビティ名が一致するか、類似しているかチェック
+                        let activities_match = if current_activity == previous_activity {
+                            // 完全一致の場合
+                            debug!("アクティビティ名が完全一致: '{}'", current_activity);
+                            true
+                        } else if let Some(api_key) = &openai_api_key {
+                            // 類似度評価（APIキーがある場合のみ）
+                            debug!("AIを使用して類似度評価を実行します");
                             
-                            debug!("前回終了時間との差: {}分", minutes_diff);
-                            
-                            // 15分以内の同名エントリならマージ
-                            if minutes_diff.abs() <= 15 {
-                                info!("同名の直前エントリをマージします (ID: {})", entry.id);
-                                
-                                // マージ用のJSONボディを構築
-                                let update_body = serde_json::json!({
-                                    "stop": stop_time.to_rfc3339(),
-                                });
-                                
-                                // エントリを更新
-                                let url = format!("https://api.track.toggl.com/api/v9/workspaces/{}/time_entries/{}", 
-                                                 workspace_id, entry.id);
-                                
-                                match toggl_client.client.patch(&url)
-                                    .headers(toggl_client.auth_headers())
-                                    .json(&update_body)
-                                    .send()
-                                    .await {
-                                    Ok(response) => {
-                                        let status = response.status();
-                                        if status.is_success() {
-                                            info!("タイムエントリを更新しました (ID: {})", entry.id);
-                                            return Ok(());
-                                        } else {
-                                            let err_text = response.text().await.unwrap_or_default();
-                                            debug!("エントリ更新失敗: HTTP {} {}", status, err_text);
-                                        }
-                                    },
-                                    Err(e) => {
-                                        debug!("エントリ更新リクエスト失敗: {}", e);
+                            match evaluate_activity_similarity(api_key, current_activity, previous_activity).await {
+                                Ok(similarity) => {
+                                    // 類似度閾値（0.85はかなり類似していることを意味する）
+                                    let similarity_threshold = 0.10;
+                                    let is_similar = similarity >= similarity_threshold;
+                                    
+                                    if is_similar {
+                                        info!("アクティビティが類似していると判断: '{}'と'{}' (類似度: {:.2})", 
+                                             current_activity, previous_activity, similarity);
+                                    } else {
+                                        debug!("アクティビティの類似度が低い: '{}'と'{}' (類似度: {:.2})", 
+                                              current_activity, previous_activity, similarity);
                                     }
+                                    
+                                    is_similar
+                                },
+                                Err(e) => {
+                                    debug!("類似度評価中にエラー発生: {}", e);
+                                    false
                                 }
-                                
-                                // マージ試行後は処理を続行（失敗しても新規エントリを作成）
-                                break;
+                            }
+                        } else {
+                            // APIキーがない場合は完全一致のみ
+                            debug!("OpenAI APIキーが利用できないため、完全一致のみ確認");
+                            false
+                        };
+
+                        if activities_match {
+                            if let Ok(last_stop) = chrono::DateTime::parse_from_rfc3339(&entry.stop.clone().unwrap()) {
+                                let last_stop_utc = last_stop.with_timezone(&chrono::Utc);
+
+                                // 詳細なデバッグ情報
+                                debug!("===== マージ検討の詳細情報 =====");
+                                debug!("前回エントリID: {}", entry.id);
+                                debug!("前回エントリ説明: '{}'", entry.description);
+                                debug!("前回エントリ開始時間: {}", entry.start);
+                                debug!("前回エントリ終了時間: {}", entry.stop.clone().unwrap_or_default());
+                                debug!("前回エントリ終了時間(UTC): {}", last_stop_utc);
+                                debug!("現在エントリ開始時間(UTC): {}", start_time);
+                                debug!("現在エントリ終了時間(UTC): {}", stop_time);
+                                debug!("現在エントリ説明: '{}'", analysis.base.activity);
+
+                                // 時間差計算の前に start_time を秒単位に丸める
+                                let start_time_truncated = start_time.with_nanosecond(0).unwrap_or(start_time);
+                                debug!("現在エントリ開始時間(丸め後): {}", start_time_truncated);
+
+                                // 直前のイベントの終了時間と現在のイベントの開始時間がほぼ等しいか確認
+                                let secs_diff = (start_time_truncated - last_stop_utc).num_seconds();
+                                debug!("前回終了時間との差: {}秒", secs_diff);
+                                debug!("マージ条件: 時間差が30分以内? {}", secs_diff.abs() <= 1800);
+
+                                // 連続する時間ブロックかどうかを確認（数秒の誤差を許容）
+                                if secs_diff.abs() <= 1800 {
+                                    info!("連続する類似イベントをマージします (ID: {})", entry.id);
+                                    
+                                    // マージ用のJSONボディを構築
+                                    let update_body = serde_json::json!({
+                                        "stop": format_datetime_for_toggl(&stop_time)
+                                    });
+                                    
+                                    // エントリを更新
+                                    let url = format!("https://api.track.toggl.com/api/v9/workspaces/{}/time_entries/{}", 
+                                                     workspace_id, entry.id);
+                                    
+                                    match toggl_client.client.put(&url)
+                                        .headers(toggl_client.auth_headers())
+                                        .json(&update_body)
+                                        .send()
+                                        .await {
+                                        Ok(response) => {
+                                            let status = response.status();
+                                            if status.is_success() {
+                                                info!("タイムエントリを更新しました (ID: {})", entry.id);
+                                                return Ok(());
+                                            } else {
+                                                let err_text = response.text().await.unwrap_or_default();
+                                                debug!("エントリ更新失敗: HTTP {} {}", status, err_text);
+                                            }
+                                        },
+                                        Err(e) => {
+                                            debug!("エントリ更新リクエスト失敗: {}", e);
+                                        }
+                                    }
+                                    
+                                    // マージ試行後は処理を続行（失敗しても新規エントリを作成）
+                                    break;
+                                }
                             }
                         }
                     }
@@ -754,8 +951,8 @@ async fn register_to_toggl_impl(
         description: analysis.base.activity.clone(),
         wid: workspace_id,
         pid: project_id,
-        start: start_time.to_rfc3339(),
-        stop: Some(stop_time.to_rfc3339()),
+        start: format_datetime_for_toggl(&start_time),
+        stop: Some(format_datetime_for_toggl(&stop_time)),
         duration: Some((stop_time - start_time).num_seconds()),
         created_with: Some("toggl_linux_rs".to_string()),
         tags: None, // タグを削除

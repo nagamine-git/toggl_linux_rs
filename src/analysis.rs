@@ -35,6 +35,9 @@ pub struct AnalysisResult {
     
     /// 関連するカレンダーイベント（タグ付け用）
     pub calendar_event: Option<crate::data_collector::CalendarEvent>,
+    
+    /// OpenAI APIキー（類似度評価用）
+    pub openai_api_key: Option<String>,
 }
 
 /// 活動候補
@@ -111,8 +114,10 @@ pub async fn analyze_with_gpt(
         let content = choice.message.content.as_deref().unwrap_or("");
         debug!("GPT response: {}", content);
         
-        // レスポンスをパースして分析結果を抽出
-        parse_gpt_response(content, data)
+        // レスポンスをパースして分析結果を抽出し、OpenAI APIキーを設定
+        let mut result = parse_gpt_response(content, data)?;
+        result.openai_api_key = Some(openai_config.api_key.clone());
+        Ok(result)
     } else {
         Err(anyhow::anyhow!("No response from GPT"))
     }
@@ -185,6 +190,7 @@ pub fn analyze_locally(data: &[CollectedData]) -> Result<AnalysisResult> {
         alternatives,
         window_title: Some(most_frequent.0),
         calendar_event,
+        openai_api_key: None,
     })
 }
 
@@ -359,5 +365,6 @@ fn parse_gpt_response(
         alternatives,
         window_title,
         calendar_event,
+        openai_api_key: None,
     })
 } 
