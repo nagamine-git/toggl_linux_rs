@@ -134,6 +134,10 @@ async fn run_daemon(config: &AppConfig) -> Result<()> {
     // 収集データの保存先を初期化
     data_collector::init_storage().context("Failed to initialize storage")?;
     
+    // データコレクターを初期化
+    let mut collector = data_collector::DataCollector::new(config.clone())
+        .context("Failed to initialize data collector")?;
+    
     // インターネット接続を確認
     if !utils::check_internet_connection() {
         utils::send_notification(
@@ -180,7 +184,7 @@ async fn run_daemon(config: &AppConfig) -> Result<()> {
         tokio::select! {
             // データ収集ループ
             _ = collect_timer.tick() => {
-                match data_collector::collect_data(config).await {
+                match collector.collect().await {
                     Ok(_) => {
                         collected_data_count += 1;
                         info!("Collected data point #{}", collected_data_count);

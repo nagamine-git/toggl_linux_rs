@@ -10,6 +10,8 @@ use std::process::Command;
 use yup_oauth2::InstalledFlowAuthenticator;
 use url;
 use urlencoding;
+use user_idle::UserIdle;
+use std::time::{Duration, Instant};
 
 use crate::config::{AppConfig, GoogleCalendarConfig};
 
@@ -65,6 +67,99 @@ pub struct CollectedData {
     
     /// 同時に発生しているカレンダーイベント
     pub calendar_events: Vec<CalendarEvent>,
+}
+
+pub struct DataCollector {
+    conn: Connection,
+    config: AppConfig,
+    idle_threshold: Duration,
+    last_active: Instant,
+}
+
+impl DataCollector {
+    pub fn new(config: AppConfig) -> Result<Self> {
+        let data_dir = Path::new(&config.general.data_dir);
+        let db_path = data_dir.join("activity.db");
+        let conn = Connection::open(&db_path).context("Failed to open database")?;
+
+        Ok(Self {
+            conn,
+            config,
+            idle_threshold: Duration::from_secs(300), // 5分のアイドルしきい値
+            last_active: Instant::now(),
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        if let Ok(idle_time) = UserIdle::get_time() {
+            return idle_time.as_milliseconds() as u64 > self.idle_threshold.as_millis() as u64;
+        }
+        false
+    }
+
+    pub async fn collect(&mut self) -> Result<()> {
+        if self.is_idle() {
+            debug!("System is idle, skipping data collection");
+            return Ok(());
+        }
+
+        // アクティブウィンドウの情報を取得
+        let window = get_active_window().context("Failed to get active window info")?;
+        
+        // カレンダーイベントを取得
+        let calendar_events = if let Some(calendar_config) = &self.config.google_calendar {
+            get_calendar_events(calendar_config)
+                .await
+                .context("Failed to get calendar events")?
+        } else {
+            Vec::new()
+        };
+
+        let data = CollectedData {
+            timestamp: Utc::now(),
+            window,
+            calendar_events,
+        };
+
+        // データを保存
+        self.save_data(&data).context("Failed to save collected data")?;
+
+        Ok(())
+    }
+
+    fn save_data(&self, data: &CollectedData) -> Result<()> {
+        // ウィンドウデータを保存
+        self.conn.execute(
+            "INSERT INTO window_data (timestamp, window_id, window_title, window_class, pid)
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                data.window.timestamp.to_rfc3339(),
+                data.window.id,
+                data.window.title,
+                data.window.class,
+                data.window.pid,
+            ],
+        ).context("Failed to insert window data")?;
+
+        // カレンダーイベントを保存
+        for event in &data.calendar_events {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO calendar_events 
+                 (event_id, title, start_time, end_time, calendar_id, description)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    event.id,
+                    event.title,
+                    event.start_time.to_rfc3339(),
+                    event.end_time.to_rfc3339(),
+                    event.calendar_id,
+                    event.description,
+                ],
+            ).context("Failed to insert calendar event")?;
+        }
+
+        Ok(())
+    }
 }
 
 /// 保存先を初期化する

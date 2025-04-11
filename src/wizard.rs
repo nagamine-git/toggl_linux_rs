@@ -89,67 +89,19 @@ impl ConfigWizard {
     fn configure_general(&self) -> Result<crate::config::GeneralConfig> {
         println!("\n{}", style("基本設定").bold());
         
-        // データ保存ディレクトリ
+        // 設定値を入力
         let data_dir: String = Input::with_theme(&self.theme)
-            .with_prompt("データ保存ディレクトリ")
-            .default("./data".to_string())
-            .interact_on(&self.term)?;
+            .with_prompt("データ保存ディレクトリのパスを入力してください")
+            .default("./data".into())
+            .interact_text()?;
         
-        // 信頼度しきい値
-        let confidence_threshold: f64 = Input::with_theme(&self.theme)
-            .with_prompt("自動登録の信頼度しきい値（0.0-1.0）")
-            .default(0.5)
-            .validate_with(|input: &f64| {
-                if *input >= 0.0 && *input <= 1.0 {
-                    Ok(())
-                } else {
-                    Err("信頼度は0.0から1.0の間で指定してください")
-                }
-            })
-            .interact_on(&self.term)?;
-        
-        // 収集間隔
-        let collect_interval_secs: u64 = Input::with_theme(&self.theme)
-            .with_prompt("データ収集時間間隔（秒）")
-            .default(60)
-            .interact_on(&self.term)?;
-        
-        // 時間ブロック分割
-        let time_block_division: u8 = Input::with_theme(&self.theme)
-            .with_prompt("1時間あたりの時間ブロック分割数")
-            .default(4)
-            .validate_with(|input: &u8| {
-                if *input > 0 && (60 % *input == 0) {
-                    Ok(())
-                } else {
-                    Err("分割数は正の値で、60の約数である必要があります (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60)")
-                }
-            })
-            .interact_on(&self.term)?;
-        
-        // 分析と記録の間隔を計算して表示
-        let minutes_per_block = 60 / time_block_division as u64;
-        let _analysis_secs = minutes_per_block * 60;
-        
-        println!("設定された時間ブロック: {} ブロック/時間", style(time_block_division).cyan());
-        println!("  → 分析間隔: {}分ごと", style(minutes_per_block).cyan());
-        println!("  → Toggl記録間隔: {}分ごと", style(minutes_per_block).cyan());
-        
-        // 一般的な時間ブロックの説明
-        match time_block_division {
-            1 => println!("  (1時間ごとに分析・記録)"),
-            2 => println!("  (30分ごとに分析・記録: XX:00, XX:30)"),
-            4 => println!("  (15分ごとに分析・記録: XX:00, XX:15, XX:30, XX:45)"),
-            6 => println!("  (10分ごとに分析・記録: XX:00, XX:10, XX:20, ...)"),
-            12 => println!("  (5分ごとに分析・記録)"),
-            _ => {},
-        }
-        
+        // 他の設定値は直接デフォルト値を使用
         Ok(crate::config::GeneralConfig {
             data_dir,
-            confidence_threshold,
-            collect_interval_secs,
-            time_block_division,
+            confidence_threshold: 0.5,
+            collect_interval_secs: 60,
+            time_block_division: 4,
+            idle_threshold_secs: 300, // デフォルトは5分
         })
     }
     

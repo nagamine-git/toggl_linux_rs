@@ -37,6 +37,9 @@ pub struct GeneralConfig {
     /// 1時間あたりの時間ブロック分割数（4=15分ごと、2=30分ごと、1=1時間ごと）
     #[serde(default = "default_time_block_division")]
     pub time_block_division: u8,
+    
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold_secs: u64,
 }
 
 /// Toggl API 設定
@@ -89,6 +92,10 @@ fn default_time_block_division() -> u8 {
     4 // 15分ごと
 }
 
+fn default_idle_threshold() -> u64 {
+    300 // デフォルトは5分
+}
+
 fn default_model() -> String {
     "gpt-4o-mini".to_string()
 }
@@ -112,6 +119,7 @@ pub fn create_default_config() -> AppConfig {
             confidence_threshold: default_confidence_threshold(),
             collect_interval_secs: default_collect_interval(),
             time_block_division: default_time_block_division(),
+            idle_threshold_secs: default_idle_threshold(),
         },
         toggl: TogglConfig {
             api_token: "your_toggl_api_token".to_string(),

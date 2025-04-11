@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Timelike, Utc};
-use log::{info, debug};
+use log::{info, debug, error};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use base64::Engine;
@@ -609,11 +609,17 @@ pub async fn register_to_toggl(config: &AppConfig, analysis: &AnalysisResult) ->
     let time_block_division = config.general.time_block_division;
     let minutes_per_block = 60 / time_block_division as u64;
     
-    // 活動の開始・終了時刻を決定（時間はタイムブロック単位に切り捨て）
+    // 活動の開始時刻を決定（時間ブロックの境界に合わせる）
+    let current_minute = analysis.timestamp.minute() as u64;
+    let block_index = current_minute / minutes_per_block;
+    let start_minute = block_index * minutes_per_block;
+    
     let start_time = analysis.timestamp
-        .with_minute(analysis.timestamp.minute() / minutes_per_block as u32 * minutes_per_block as u32)
+        .with_minute(start_minute as u32)
         .unwrap_or(analysis.timestamp)
         .with_second(0)
+        .unwrap_or(analysis.timestamp)
+        .with_nanosecond(0)
         .unwrap_or(analysis.timestamp);
     
     let stop_time = start_time + Duration::minutes(minutes_per_block as i64);
@@ -897,10 +903,10 @@ async fn register_to_toggl_impl(
                                 // 直前のイベントの終了時間と現在のイベントの開始時間がほぼ等しいか確認
                                 let secs_diff = (start_time_truncated - last_stop_utc).num_seconds();
                                 debug!("前回終了時間との差: {}秒", secs_diff);
-                                debug!("マージ条件: 時間差が30分以内? {}", secs_diff.abs() <= 1800);
+                                debug!("マージ条件: 時間差が15分以内? {}", secs_diff.abs() <= 900);
 
                                 // 連続する時間ブロックかどうかを確認（数秒の誤差を許容）
-                                if secs_diff.abs() <= 1800 {
+                                if secs_diff.abs() <= 900 {
                                     info!("連続する類似イベントをマージします (ID: {})", entry.id);
                                     
                                     // マージ用のJSONボディを構築
