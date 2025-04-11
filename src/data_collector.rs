@@ -67,6 +67,9 @@ pub struct CollectedData {
     
     /// 同時に発生しているカレンダーイベント
     pub calendar_events: Vec<CalendarEvent>,
+
+    /// システムがアイドル状態かどうか
+    pub is_idle: bool,
 }
 
 pub struct DataCollector {
@@ -74,6 +77,9 @@ pub struct DataCollector {
     config: AppConfig,
     idle_threshold: Duration,
     last_active: Instant,
+    idle_start: Option<Instant>,
+    total_idle_time: Duration,
+    block_start: Instant,
 }
 
 impl DataCollector {
@@ -87,19 +93,54 @@ impl DataCollector {
             config,
             idle_threshold: Duration::from_secs(300), // 5分のアイドルしきい値
             last_active: Instant::now(),
+            idle_start: None,
+            total_idle_time: Duration::from_secs(0),
+            block_start: Instant::now(),
         })
     }
 
-    fn is_idle(&self) -> bool {
+    fn is_idle(&mut self) -> bool {
         if let Ok(idle_time) = UserIdle::get_time() {
-            return idle_time.as_milliseconds() as u64 > self.idle_threshold.as_millis() as u64;
+            let is_idle = idle_time.as_milliseconds() as u64 > self.idle_threshold.as_millis() as u64;
+            
+            // アイドル状態の開始時刻を記録
+            if is_idle && self.idle_start.is_none() {
+                self.idle_start = Some(Instant::now());
+            } else if !is_idle && self.idle_start.is_some() {
+                // アイドル状態が終了した場合、合計アイドル時間を更新
+                if let Some(start) = self.idle_start.take() {
+                    self.total_idle_time += start.elapsed();
+                }
+            }
+
+            // 15分経過したらブロックをリセット
+            if self.block_start.elapsed() >= Duration::from_secs(900) {
+                self.block_start = Instant::now();
+                self.total_idle_time = Duration::from_secs(0);
+                self.idle_start = None;
+            }
+
+            is_idle
+        } else {
+            false
         }
-        false
     }
 
     pub async fn collect(&mut self) -> Result<()> {
-        if self.is_idle() {
-            debug!("System is idle, skipping data collection");
+        // アイドル状態をチェック
+        let is_idle = self.is_idle();
+
+        // 現在のアイドル時間を計算
+        let current_idle_time = if let Some(start) = self.idle_start {
+            self.total_idle_time + start.elapsed()
+        } else {
+            self.total_idle_time
+        };
+
+        // 15分の半分（7.5分 = 450秒）以上がアイドル状態なら記録しない
+        if current_idle_time >= Duration::from_secs(450) {
+            debug!("More than half of the 15-minute block is idle ({}s), skipping data collection", 
+                   current_idle_time.as_secs());
             return Ok(());
         }
 
@@ -119,6 +160,7 @@ impl DataCollector {
             timestamp: Utc::now(),
             window,
             calendar_events,
+            is_idle,
         };
 
         // データを保存
@@ -759,6 +801,7 @@ pub fn get_recent_data() -> Result<Vec<CollectedData>> {
             timestamp: window.timestamp,
             window: window.clone(),
             calendar_events: events,
+            is_idle: false, // 過去のデータは非アイドル状態として扱う
         }
     }).collect();
     
